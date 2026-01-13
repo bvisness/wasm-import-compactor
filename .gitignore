@@ -1,0 +1,5 @@
+corpus/**/*.wasm
+corpus/**/*.wat
+corpus/**/*.wasm.gz
+*.dump
+.DS_Store
