@@ -12,7 +12,7 @@ get_size() {
 mkdir -p compacted
 echo "file,before,after,before_compressed,after_compressed,import_before,import_after"
 for file in *.wasm; do
-  go run .. $file -o compacted/$file
+  go run .. $file -o compacted/$file --counts compacted/$file.counts.csv
   gzip -k --force $file
   gzip -k --force compacted/$file
 

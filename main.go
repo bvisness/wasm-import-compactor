@@ -22,8 +22,10 @@ func main() {
 			filename := args[0]
 
 			var wasm io.Reader
+			var niceName string
 			if filename == "-" {
 				wasm = os.Stdin
+				niceName = "<stdin>"
 			} else {
 				var err error
 				wasm, err = os.Open(filename)
@@ -31,6 +33,7 @@ func main() {
 					err := err.(*os.PathError)
 					exitWithError("could not open file %s: %v", err.Path, err.Err)
 				}
+				niceName = filename
 			}
 
 			var out io.Writer
@@ -46,13 +49,27 @@ func main() {
 				}
 			}
 
-			err := compactor.CompactImports(wasm, out)
+			var countsOut io.Writer
+			countsname := utils.Must1(rootCmd.PersistentFlags().GetString("counts"))
+			if countsname == "-" {
+				countsOut = io.Discard
+			} else {
+				var err error
+				countsOut, err = os.Create(countsname)
+				if err != nil {
+					err := err.(*os.PathError)
+					exitWithError("could not open counts output file %s: %v", err.Path, err.Err)
+				}
+			}
+
+			err := compactor.CompactImports(niceName, wasm, out, countsOut)
 			if err != nil {
 				exitWithError("%v", err)
 			}
 		},
 	}
 	rootCmd.PersistentFlags().StringP("out", "o", "-", "The file to write output to. Defaults to stdout.")
+	rootCmd.PersistentFlags().String("counts", "-", "The file to write information about import counts to. Defaults to no output.")
 	utils.Must(rootCmd.Execute())
 }
 

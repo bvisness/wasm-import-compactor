@@ -1,12 +1,15 @@
 package compactor
 
 import (
+	"encoding/csv"
 	"errors"
 	"io"
 	"slices"
+	"strconv"
 
 	"github.com/bvisness/wasm-import-compactor/leb128"
 	"github.com/bvisness/wasm-import-compactor/parser"
+	"github.com/bvisness/wasm-import-compactor/utils"
 )
 
 type ImportEncoder interface {
@@ -68,8 +71,10 @@ func (g GroupSameModuleAndType) Encode() []byte {
 	return res
 }
 
-func CompactImports(wasm io.Reader, out io.Writer) error {
+func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io.Writer) error {
 	p := parser.NewParser(wasm)
+	importCounts := map[string]int{}
+	numImportsTotal := 0
 
 	if err := p.Expect("magic number", []byte{0, 'a', 's', 'm'}); err != nil {
 		return err
@@ -155,6 +160,8 @@ func CompactImports(wasm io.Reader, out io.Writer) error {
 				externtype := p.StopRecording()
 
 				imports = append(imports, Import{modName, itemName, externtype})
+				importCounts[modName]++
+				numImportsTotal++
 			}
 
 			// "RLE" the imports into chunks for the new encodings
@@ -230,6 +237,13 @@ func CompactImports(wasm io.Reader, out io.Writer) error {
 			out.Write(body)
 		}
 	}
+
+	w := csv.NewWriter(countsOut)
+	for modName, count := range importCounts {
+		w.Write([]string{fileName, modName, strconv.Itoa(count), strconv.Itoa(numImportsTotal)})
+	}
+	w.Flush()
+	utils.Must(w.Error())
 
 	return nil
 }
