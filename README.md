@@ -14,6 +14,8 @@ Usage:
 Flags:
   -h, --help         help for wasm-import-compactor
   -o, --out string   The file to write output to. Defaults to stdout. (default "-")
+```
 
+```
 $ go run main.go original.wasm -o compacted.wasm
 ```
