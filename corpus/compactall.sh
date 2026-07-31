@@ -14,9 +14,9 @@ get_size() {
 mkdir -p compacted
 mkdir -p binaryenated
 mkdir -p binaryenated_compact
-echo "file,before,after,binaryenated,binaryenated_compact,before_compressed,after_compressed,binaryenated_compressed,binaryenated_compact_compressed,import_before,import_after,import_binaryenated,import_binaryenated_compact"
+echo "file,before,after,binaryenated,binaryenated_compact,before_compressed,after_compressed,binaryenated_compressed,binaryenated_compact_compressed,import_before,import_after,import_binaryenated,import_binaryenated_compact,min_possible"
 for file in *.wasm; do
-  go run .. $file -o compacted/$file --counts compacted/$file.counts.csv
+  go run .. $file -o compacted/$file --counts compacted/$file.counts.csv --min-possible compacted/$file.min.csv
   gzip -k --force $file
   gzip -k --force compacted/$file
 
@@ -41,6 +41,7 @@ for file in *.wasm; do
   import_after=$((16#$import_after_hex))
   import_binaryenated=$((16#$import_binaryenated_hex))
   import_binaryenated_compact=$((16#$import_binaryenated_compact_hex))
+  import_min_possible=$(<"compacted/$file.min.csv")
 
-  echo "$file,$before,$after,$binaryenated,$binaryenated_compact,$before_compressed,$after_compressed,$binaryenated_compressed,$binaryenated_compact_compressed,$import_before,$import_after,$import_binaryenated,$import_binaryenated_compact"
+  echo "$file,$before,$after,$binaryenated,$binaryenated_compact,$before_compressed,$after_compressed,$binaryenated_compressed,$binaryenated_compact_compressed,$import_before,$import_after,$import_binaryenated,$import_binaryenated_compact,$import_min_possible"
 done

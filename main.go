@@ -50,19 +50,36 @@ func main() {
 			}
 
 			var countsOut io.Writer
-			countsname := utils.Must1(rootCmd.PersistentFlags().GetString("counts"))
-			if countsname == "-" {
-				countsOut = io.Discard
-			} else {
-				var err error
-				countsOut, err = os.Create(countsname)
-				if err != nil {
-					err := err.(*os.PathError)
-					exitWithError("could not open counts output file %s: %v", err.Path, err.Err)
+			{
+				countsname := utils.Must1(rootCmd.PersistentFlags().GetString("counts"))
+				if countsname == "-" {
+					countsOut = io.Discard
+				} else {
+					var err error
+					countsOut, err = os.Create(countsname)
+					if err != nil {
+						err := err.(*os.PathError)
+						exitWithError("could not open counts output file %s: %v", err.Path, err.Err)
+					}
 				}
 			}
 
-			err := compactor.CompactImports(niceName, wasm, out, countsOut)
+			var minPossibleOut io.Writer
+			{
+				minPossibleName := utils.Must1(rootCmd.PersistentFlags().GetString("min-possible"))
+				if minPossibleName == "-" {
+					minPossibleOut = io.Discard
+				} else {
+					var err error
+					minPossibleOut, err = os.Create(minPossibleName)
+					if err != nil {
+						err := err.(*os.PathError)
+						exitWithError("could not open min possible output file %s: %v", err.Path, err.Err)
+					}
+				}
+			}
+
+			err := compactor.CompactImports(niceName, wasm, out, countsOut, minPossibleOut)
 			if err != nil {
 				exitWithError("%v", err)
 			}
@@ -70,6 +87,7 @@ func main() {
 	}
 	rootCmd.PersistentFlags().StringP("out", "o", "-", "The file to write output to. Defaults to stdout.")
 	rootCmd.PersistentFlags().String("counts", "-", "The file to write information about import counts to. Defaults to no output.")
+	rootCmd.PersistentFlags().String("min-possible", "-", "The file to which to write the estimated import section size if imports could be freely reordered. Defaults to no output.")
 	utils.Must(rootCmd.Execute())
 }
 

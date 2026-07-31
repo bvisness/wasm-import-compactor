@@ -1,6 +1,7 @@
 package compactor
 
 import (
+	"cmp"
 	"encoding/csv"
 	"errors"
 	"io"
@@ -71,10 +72,11 @@ func (g GroupSameModuleAndType) Encode() []byte {
 	return res
 }
 
-func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io.Writer) error {
+func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io.Writer, minPossibleOut io.Writer) error {
 	p := parser.NewParser(wasm)
 	importCounts := map[string]int{}
 	numImportsTotal := 0
+	minPossible := 0
 
 	if err := p.Expect("magic number", []byte{0, 'a', 's', 'm'}); err != nil {
 		return err
@@ -164,63 +166,8 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 				numImportsTotal++
 			}
 
-			// "RLE" the imports into chunks for the new encodings
-			var groups []ImportEncoder
-			for i := 0; i < len(imports); {
-				imp := imports[i]
-
-				sameModuleItems := []GroupSameModuleItem{{
-					Name:       imp.ItemName,
-					Externtype: imp.Externtype,
-				}}
-				sameModuleAndTypeItems := []string{imp.ItemName}
-				doneAddingSameModuleAndType := false
-				for j := i + 1; j < len(imports); j++ {
-					next := imports[j]
-					sameMod := imp.ModName == next.ModName
-					sameType := slices.Equal(imp.Externtype, next.Externtype)
-
-					if !sameMod {
-						break
-					}
-
-					sameModuleItems = append(sameModuleItems, GroupSameModuleItem{
-						Name:       next.ItemName,
-						Externtype: next.Externtype,
-					})
-					if sameType {
-						if !doneAddingSameModuleAndType {
-							sameModuleAndTypeItems = append(sameModuleAndTypeItems, next.ItemName)
-						}
-					} else {
-						doneAddingSameModuleAndType = true
-					}
-				}
-
-				if len(sameModuleItems) < len(sameModuleAndTypeItems) {
-					panic("logic bug - more items with the same module and type, than items with the same module")
-				}
-
-				if len(sameModuleAndTypeItems) > 2 {
-					groups = append(groups, GroupSameModuleAndType{
-						ModName:    imp.ModName,
-						Externtype: imp.Externtype,
-						Items:      sameModuleAndTypeItems,
-					})
-					i += len(sameModuleAndTypeItems)
-				} else if len(sameModuleItems) > 1 {
-					groups = append(groups, GroupSameModule{
-						ModName: imp.ModName,
-						Items:   sameModuleItems,
-					})
-					i += len(sameModuleItems)
-				} else {
-					groups = append(groups, imp)
-					i += 1
-				}
-			}
-
 			// Emit new import section
+			groups := rleImports(imports)
 			out.Write([]byte{0x02})
 			var outBody []byte
 			outBody = appendU32(outBody, uint32(len(groups)))
@@ -230,6 +177,20 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 			out.Write(leb128.EncodeU64(uint64(len(outBody))))
 			out.Write(outBody)
 
+			// Estimate the min possible import section size by sorting imports first
+			// by module name and externtype, then re-encoding.
+			slices.SortStableFunc(imports, func(a, b Import) int {
+				return cmp.Or(
+					cmp.Compare(a.ModName, b.ModName),
+					slices.Compare(a.Externtype, b.Externtype),
+				)
+			})
+			sortedGroups := rleImports(imports)
+			minPossible += lebLen(len(sortedGroups))
+			for _, group := range sortedGroups {
+				minPossible += len(group.Encode())
+			}
+
 		// Pass through all other sections
 		default:
 			out.Write([]byte{sectionId})
@@ -238,14 +199,83 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 		}
 	}
 
-	w := csv.NewWriter(countsOut)
-	for modName, count := range importCounts {
-		w.Write([]string{fileName, modName, strconv.Itoa(count), strconv.Itoa(numImportsTotal)})
+	// Write counts
+	{
+		w := csv.NewWriter(countsOut)
+		for modName, count := range importCounts {
+			w.Write([]string{fileName, modName, strconv.Itoa(count), strconv.Itoa(numImportsTotal)})
+		}
+		w.Flush()
+		utils.Must(w.Error())
 	}
-	w.Flush()
-	utils.Must(w.Error())
+
+	// Write min possible import section size (est.)
+	{
+		w := csv.NewWriter(minPossibleOut)
+		w.Write([]string{strconv.Itoa(minPossible)})
+		w.Flush()
+		utils.Must(w.Error())
+	}
 
 	return nil
+}
+
+func rleImports(imports []Import) []ImportEncoder {
+	var groups []ImportEncoder
+	for i := 0; i < len(imports); {
+		imp := imports[i]
+
+		sameModuleItems := []GroupSameModuleItem{{
+			Name:       imp.ItemName,
+			Externtype: imp.Externtype,
+		}}
+		sameModuleAndTypeItems := []string{imp.ItemName}
+		doneAddingSameModuleAndType := false
+		for j := i + 1; j < len(imports); j++ {
+			next := imports[j]
+			sameMod := imp.ModName == next.ModName
+			sameType := slices.Equal(imp.Externtype, next.Externtype)
+
+			if !sameMod {
+				break
+			}
+
+			sameModuleItems = append(sameModuleItems, GroupSameModuleItem{
+				Name:       next.ItemName,
+				Externtype: next.Externtype,
+			})
+			if sameType {
+				if !doneAddingSameModuleAndType {
+					sameModuleAndTypeItems = append(sameModuleAndTypeItems, next.ItemName)
+				}
+			} else {
+				doneAddingSameModuleAndType = true
+			}
+		}
+
+		if len(sameModuleItems) < len(sameModuleAndTypeItems) {
+			panic("logic bug - more items with the same module and type, than items with the same module")
+		}
+
+		if len(sameModuleAndTypeItems) > 2 {
+			groups = append(groups, GroupSameModuleAndType{
+				ModName:    imp.ModName,
+				Externtype: imp.Externtype,
+				Items:      sameModuleAndTypeItems,
+			})
+			i += len(sameModuleAndTypeItems)
+		} else if len(sameModuleItems) > 1 {
+			groups = append(groups, GroupSameModule{
+				ModName: imp.ModName,
+				Items:   sameModuleItems,
+			})
+			i += len(sameModuleItems)
+		} else {
+			groups = append(groups, imp)
+			i += 1
+		}
+	}
+	return groups
 }
 
 // --------------------------------
@@ -259,4 +289,8 @@ func appendName(s []byte, name string) []byte {
 
 func appendU32(s []byte, n uint32) []byte {
 	return append(s, leb128.EncodeU64(uint64(n))...)
+}
+
+func lebLen(n int) int {
+	return len(leb128.EncodeU64(uint64(n)))
 }
