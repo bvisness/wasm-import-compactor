@@ -1,5 +1,6 @@
 corpus/**/*.wasm
 corpus/**/*.wat
 corpus/**/*.wasm.gz
+*.csv
 *.dump
 .DS_Store
