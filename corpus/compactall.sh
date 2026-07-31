@@ -20,8 +20,8 @@ for file in *.wasm; do
   gzip -k --force $file
   gzip -k --force compacted/$file
 
-  $WASM_OPT -Oz --strip-debug -all --disable-compact-imports $file -o binaryenated/$file
-  $WASM_OPT -Oz --strip-debug -all $file -o binaryenated_compact/$file
+  $WASM_OPT -O1 -all --strip-debug --generate-stack-ir --optimize-stack-ir --disable-compact-imports $file -o binaryenated/$file
+  $WASM_OPT -O1 -all --strip-debug --generate-stack-ir --optimize-stack-ir $file -o binaryenated_compact/$file
   gzip -k --force binaryenated/$file
   gzip -k --force binaryenated_compact/$file
 
