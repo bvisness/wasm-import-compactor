@@ -72,7 +72,14 @@ func (g GroupSameModuleAndType) Encode() []byte {
 	return res
 }
 
-func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io.Writer, minPossibleOut io.Writer) error {
+func CompactImports(
+	fileName string,
+	wasm io.Reader,
+	enableEncoding2 bool,
+	out io.Writer,
+	countsOut io.Writer,
+	minPossibleOut io.Writer,
+) error {
 	p := parser.NewParser(wasm)
 	importCounts := map[string]int{}
 	numImportsTotal := 0
@@ -167,7 +174,7 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 			}
 
 			// Emit new import section
-			groups := rleImports(imports)
+			groups := rleImports(imports, enableEncoding2)
 			out.Write([]byte{0x02})
 			var outBody []byte
 			outBody = appendU32(outBody, uint32(len(groups)))
@@ -185,7 +192,7 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 					slices.Compare(a.Externtype, b.Externtype),
 				)
 			})
-			sortedGroups := rleImports(imports)
+			sortedGroups := rleImports(imports, enableEncoding2)
 			minPossible += lebLen(len(sortedGroups))
 			for _, group := range sortedGroups {
 				minPossible += len(group.Encode())
@@ -220,7 +227,7 @@ func CompactImports(fileName string, wasm io.Reader, out io.Writer, countsOut io
 	return nil
 }
 
-func rleImports(imports []Import) []ImportEncoder {
+func rleImports(imports []Import, enableEncoding2 bool) []ImportEncoder {
 	var groups []ImportEncoder
 	for i := 0; i < len(imports); {
 		imp := imports[i]
@@ -257,7 +264,7 @@ func rleImports(imports []Import) []ImportEncoder {
 			panic("logic bug - more items with the same module and type, than items with the same module")
 		}
 
-		if len(sameModuleAndTypeItems) > 2 {
+		if enableEncoding2 && len(sameModuleAndTypeItems) > 2 {
 			groups = append(groups, GroupSameModuleAndType{
 				ModName:    imp.ModName,
 				Externtype: imp.Externtype,

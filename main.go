@@ -79,13 +79,14 @@ func main() {
 				}
 			}
 
-			err := compactor.CompactImports(niceName, wasm, out, countsOut, minPossibleOut)
+			err := compactor.CompactImports(niceName, wasm, utils.Must1(rootCmd.PersistentFlags().GetBool("encoding-2")), out, countsOut, minPossibleOut)
 			if err != nil {
 				exitWithError("%v", err)
 			}
 		},
 	}
 	rootCmd.PersistentFlags().StringP("out", "o", "-", "The file to write output to. Defaults to stdout.")
+	rootCmd.PersistentFlags().Bool("encoding-2", true, "Whether to allow compact imports encoding 2.")
 	rootCmd.PersistentFlags().String("counts", "-", "The file to write information about import counts to. Defaults to no output.")
 	rootCmd.PersistentFlags().String("min-possible", "-", "The file to which to write the estimated import section size if imports could be freely reordered. Defaults to no output.")
 	utils.Must(rootCmd.Execute())
