@@ -227,62 +227,176 @@ func CompactImports(
 	return nil
 }
 
+// rleImports groups the imports into blocks for the new encodings, always
+// keeping them in their original order. No encoding can span module names, so
+// each run of imports from the same module is laid out on its own.
 func rleImports(imports []Import, enableEncoding2 bool) []ImportEncoder {
 	var groups []ImportEncoder
-	for i := 0; i < len(imports); {
-		imp := imports[i]
+	for _, module := range maximalRuns(imports, func(a, b Import) bool {
+		return a.ModName == b.ModName
+	}) {
+		groups = append(groups, groupOneModule(module, enableEncoding2)...)
+	}
+	return groups
+}
 
-		sameModuleItems := []GroupSameModuleItem{{
-			Name:       imp.ItemName,
-			Externtype: imp.Externtype,
-		}}
-		sameModuleAndTypeItems := []string{imp.ItemName}
-		doneAddingSameModuleAndType := false
-		for j := i + 1; j < len(imports); j++ {
-			next := imports[j]
-			sameMod := imp.ModName == next.ModName
-			sameType := slices.Equal(imp.Externtype, next.Externtype)
+// What to do with one stretch of same-typed imports.
+type stretchPlan int
 
-			if !sameMod {
-				break
-			}
+const (
+	planGroupWithNeighbors stretchPlan = iota // share a GroupSameModule with the stretches beside it
+	planOwnGroup                              // a GroupSameModuleAndType of its own
+	planPlain                                 // one plain Import per item
+)
 
-			sameModuleItems = append(sameModuleItems, GroupSameModuleItem{
-				Name:       next.ItemName,
-				Externtype: next.Externtype,
-			})
-			if sameType {
-				if !doneAddingSameModuleAndType {
-					sameModuleAndTypeItems = append(sameModuleAndTypeItems, next.ItemName)
-				}
-			} else {
-				doneAddingSameModuleAndType = true
-			}
+// groupOneModule lays out a run of imports that all share a module name,
+// choosing whichever encodings actually cost the fewest bytes.
+//
+// Only whole stretches of same-typed imports are worth considering as a unit: a
+// GroupSameModuleAndType cannot span externtypes, and growing one to cover its
+// entire stretch always pays for itself, because every import it absorbs saves
+// an externtype and costs at most a byte of item count. So the layout is decided
+// one stretch at a time.
+//
+// The catch is that pulling a stretch out of the middle of a module's imports
+// splits the GroupSameModule around it in two, paying for the module name an
+// extra time. The choices are therefore not independent, and we run a small
+// dynamic program over the stretches, tracking the cheapest layout both with
+// and without a GroupSameModule left open for the next stretch to join.
+//
+// The one wrinkle is that a group's item count is charged along the cheapest
+// path only, so where a group's count would cross a LEB128 boundary (128 items,
+// then 16384, ...) the layout can be a byte or two off the true optimum.
+func groupOneModule(imports []Import, enableEncoding2 bool) []ImportEncoder {
+	modName := imports[0].ModName
+	// Module name, empty item name, and the encoding byte.
+	blockOverhead := nameLen(modName) + nameLen("") + 1
+
+	stretches := maximalRuns(imports, func(a, b Import) bool {
+		return slices.Equal(a.Externtype, b.Externtype)
+	})
+
+	// closed[t] is the cost of the cheapest layout of stretches[:t+1] that ends
+	// with no GroupSameModule open; open[t] is the cheapest that does, and
+	// openLen[t] counts the imports in that group so far. The other slices
+	// remember the decisions so we can walk them back afterwards.
+	closed := make([]int, len(stretches))
+	closedPlan := make([]stretchPlan, len(stretches))
+	closedAfterOpen := make([]bool, len(stretches))
+	open := make([]int, len(stretches))
+	openLen := make([]int, len(stretches))
+	openExtends := make([]bool, len(stretches))
+
+	for t, stretch := range stretches {
+		externtypeLen := len(stretch[0].Externtype)
+		nameBytes := 0
+		for _, imp := range stretch {
+			nameBytes += nameLen(imp.ItemName)
 		}
 
-		if len(sameModuleItems) < len(sameModuleAndTypeItems) {
-			panic("logic bug - more items with the same module and type, than items with the same module")
+		// Joining a GroupSameModule pays for an externtype per import, but not
+		// for that group's own overhead, which is paid when it is opened.
+		join := nameBytes + len(stretch)*externtypeLen
+		ownGroup := blockOverhead + externtypeLen + lebLen(len(stretch)) + nameBytes
+		plainImports := len(stretch) * (nameLen(modName) + externtypeLen)
+
+		// Standing apart from its neighbors, cheapest way.
+		apart, plan := plainImports+nameBytes, planPlain
+		if enableEncoding2 && ownGroup < apart {
+			apart, plan = ownGroup, planOwnGroup
 		}
 
-		if enableEncoding2 && len(sameModuleAndTypeItems) > 2 {
-			groups = append(groups, GroupSameModuleAndType{
-				ModName:    imp.ModName,
-				Externtype: imp.Externtype,
-				Items:      sameModuleAndTypeItems,
-			})
-			i += len(sameModuleAndTypeItems)
-		} else if len(sameModuleItems) > 1 {
-			groups = append(groups, GroupSameModule{
-				ModName: imp.ModName,
-				Items:   sameModuleItems,
-			})
-			i += len(sameModuleItems)
+		if t == 0 {
+			closed[t], closedPlan[t] = apart, plan
+			open[t] = blockOverhead + lebLen(len(stretch)) + join
+			openLen[t] = len(stretch)
+			continue
+		}
+
+		// Standing apart also closes any open group, which costs nothing
+		// extra - that group's bytes were paid as it was opened and extended.
+		before, afterOpen := closed[t-1], false
+		if open[t-1] < before {
+			before, afterOpen = open[t-1], true
+		}
+		closed[t], closedPlan[t], closedAfterOpen[t] = before+apart, plan, afterOpen
+
+		// Extend the open group, or close it and start a new one. Extending
+		// also pays for any extra bytes in the group's item count.
+		extend := open[t-1] + join + lebLen(openLen[t-1]+len(stretch)) - lebLen(openLen[t-1])
+		startNew := closed[t-1] + blockOverhead + lebLen(len(stretch)) + join
+		if extend <= startNew {
+			open[t], openLen[t], openExtends[t] = extend, openLen[t-1]+len(stretch), true
 		} else {
-			groups = append(groups, imp)
-			i += 1
+			open[t], openLen[t] = startNew, len(stretch)
+		}
+	}
+
+	// Walk the decisions back to front to recover the layout.
+	plans := make([]stretchPlan, len(stretches))
+	inOpenGroup := open[len(stretches)-1] < closed[len(stretches)-1]
+	for t := len(stretches) - 1; t >= 0; t-- {
+		if inOpenGroup {
+			plans[t] = planGroupWithNeighbors
+			inOpenGroup = openExtends[t]
+		} else {
+			plans[t] = closedPlan[t]
+			inOpenGroup = closedAfterOpen[t]
+		}
+	}
+
+	var groups []ImportEncoder
+	for t := 0; t < len(stretches); {
+		switch plans[t] {
+		case planGroupWithNeighbors:
+			// Consecutive stretches always belong to the same group; the
+			// layout never puts two GroupSameModules next to each other,
+			// since merging them would save the module name.
+			var items []GroupSameModuleItem
+			for ; t < len(stretches) && plans[t] == planGroupWithNeighbors; t++ {
+				for _, imp := range stretches[t] {
+					items = append(items, GroupSameModuleItem{
+						Name:       imp.ItemName,
+						Externtype: imp.Externtype,
+					})
+				}
+			}
+			groups = append(groups, GroupSameModule{ModName: modName, Items: items})
+		case planOwnGroup:
+			var items []string
+			for _, imp := range stretches[t] {
+				items = append(items, imp.ItemName)
+			}
+			groups = append(groups, GroupSameModuleAndType{
+				ModName:    modName,
+				Externtype: stretches[t][0].Externtype,
+				Items:      items,
+			})
+			t++
+		case planPlain:
+			for _, imp := range stretches[t] {
+				groups = append(groups, imp)
+			}
+			t++
 		}
 	}
 	return groups
+}
+
+// maximalRuns splits imports into maximal runs of consecutive imports that same
+// reports as belonging together. Each import is compared against the first
+// import of the run it might join.
+func maximalRuns(imports []Import, same func(a, b Import) bool) [][]Import {
+	var runs [][]Import
+	for i := 0; i < len(imports); {
+		j := i + 1
+		for j < len(imports) && same(imports[i], imports[j]) {
+			j++
+		}
+		runs = append(runs, imports[i:j])
+		i = j
+	}
+	return runs
 }
 
 // --------------------------------
@@ -300,4 +414,8 @@ func appendU32(s []byte, n uint32) []byte {
 
 func lebLen(n int) int {
 	return len(leb128.EncodeU64(uint64(n)))
+}
+
+func nameLen(name string) int {
+	return lebLen(len(name)) + len(name)
 }
